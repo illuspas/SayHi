@@ -1,15 +1,39 @@
 package cn.cloudstep.sayhi;
 
-import android.os.Bundle;
 import android.app.Activity;
+import android.os.Bundle;
 import android.view.Menu;
+import android.view.View;
+import android.view.View.OnClickListener;
+import android.widget.Button;
 
 public class MainActivity extends Activity {
+	SayHi say;
+	Button bt1, bt2;
 
 	@Override
 	protected void onCreate(Bundle savedInstanceState) {
 		super.onCreate(savedInstanceState);
 		setContentView(R.layout.activity_main);
+		say = new SayHi();
+		say.Init();
+
+		bt1 = (Button) findViewById(R.id.button1);
+		bt2 = (Button) findViewById(R.id.button2);
+		bt1.setOnClickListener(new OnClickListener() {
+
+			@Override
+			public void onClick(View v) {
+				say.OpenPublisher("rtmp://1932");
+			}
+		});
+		bt2.setOnClickListener(new OnClickListener() {
+
+			@Override
+			public void onClick(View v) {
+				say.ClosePublisher();
+			}
+		});
 	}
 
 	@Override
@@ -19,4 +43,9 @@ public class MainActivity extends Activity {
 		return true;
 	}
 
+	@Override
+	protected void onDestroy() {
+		super.onDestroy();
+
+	}
 }

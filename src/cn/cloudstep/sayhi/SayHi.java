@@ -8,6 +8,9 @@ public class SayHi {
 	public native void ClosePlayer();
 	public native void Deinit();
 	
+	private void onEventCallback(int event) {
+		System.out.println("onEventCallback: "+ event);
+	}
 	static {
 		System.loadLibrary("sayhi");
 	}
