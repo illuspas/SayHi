@@ -2,9 +2,6 @@
 #include <assert.h>
 #include <string.h>
 
-// for __android_log_print(ANDROID_LOG_INFO, "YourApp", "formatted message");
-// #include <android/log.h>
-
 // for native audio
 #include <SLES/OpenSLES.h>
 #include <SLES/OpenSLES_Android.h>
@@ -50,7 +47,16 @@ pthread_mutex_t recodMutex;
 pthread_cond_t recodCond;
 int isStartPub;
 
+SpeexBits ebits;     //speex
+int enc_frame_size;
+void *enc_state;
+
+
+
 //player variable
+int dec_frame_size; //speex
+SpeexBits dbits;
+void *dec_state;
 
 void bqRecorderCallback(SLAndroidSimpleBufferQueueItf bq, void *context)
 {
@@ -108,10 +114,16 @@ int initNativeRecoder()
     LOGI("startRecoding success \n");
     return JNI_TRUE;
 }
+
+
 void* openPubliserThread(void* args)
 {
     JNIEnv *env;
     SLresult result;
+    int i,enc_size;
+    short* pcm_buffer;
+    char*  output_buffer;
+    int compression = 4;
     (*gJvm)->AttachCurrentThread(gJvm, &env, NULL);
     pthread_mutex_init(&recodMutex, NULL);
     pthread_cond_init(&recodCond, NULL);
@@ -120,8 +132,18 @@ void* openPubliserThread(void* args)
         (*env)->CallVoidMethod(env, gObj, eventMid, 2);
         return NULL;
     }
+    //init speex encoder
+    speex_bits_init(&ebits);
+    enc_state = speex_encoder_init(&speex_nb_mode);
+    speex_encoder_ctl(enc_state, SPEEX_SET_QUALITY, &compression);
+    speex_encoder_ctl(enc_state, SPEEX_GET_FRAME_SIZE, &enc_frame_size);
+    pcm_buffer = malloc(enc_frame_size*sizeof(short));
+    output_buffer = malloc(enc_frame_size*sizeof(char));
+    LOGI("Speex Encoder init,enc_frame_size:%d\n",enc_frame_size);
+
     (*env)->CallVoidMethod(env, gObj, eventMid, 3);
     isStartPub = 1;
+    struct timeval start, end;
     while (isStartPub) {
         pthread_mutex_lock(&recodMutex);
         // enqueue an empty buffer to be filled by the recorder
@@ -133,6 +155,19 @@ void* openPubliserThread(void* args)
         pthread_cond_wait(&recodCond, &recodMutex);
         pthread_mutex_unlock(&recodMutex);
         LOGI("Got the audio buffer");
+        gettimeofday(&start, NULL);
+        for(i=0;i<RECORDER_FRAMES;i+=enc_frame_size)
+        {
+//            LOGI("encode position:%d\n",i);
+            speex_bits_reset(&ebits);
+            memcpy(pcm_buffer,recorderBuffer+i,enc_frame_size);
+            speex_encode_int(enc_state, pcm_buffer, &ebits);
+            enc_size = speex_bits_write(&ebits,output_buffer,enc_frame_size);
+
+        }
+        gettimeofday(&end, NULL);
+        int timeuse = 1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec;
+        LOGI("Encoding finish timeuse:%d\n",timeuse);
     }
     result = (*recorderRecord)->SetRecordState(recorderRecord, SL_RECORDSTATE_STOPPED);
     if (SL_RESULT_SUCCESS == result) {
@@ -140,7 +175,11 @@ void* openPubliserThread(void* args)
     }
     (*env)->CallVoidMethod(env, gObj, eventMid, 4);
     (*gJvm)->DetachCurrentThread(gJvm);
+    free(pcm_buffer);
+    free(output_buffer);
     free(pubRtmpUrl);
+    speex_bits_destroy(&ebits);
+    speex_encoder_destroy(enc_state);
 }
 
 /*

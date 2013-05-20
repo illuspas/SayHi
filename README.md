@@ -1,4 +1,4 @@
 SayHi
 =====
 
-Native audio recoding and speex encoding,transport by rtmp.
+Native audio recording and speex encoding,transport by rtmp.
