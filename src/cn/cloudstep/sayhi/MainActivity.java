@@ -24,7 +24,7 @@ public class MainActivity extends Activity {
 
 			@Override
 			public void onClick(View v) {
-				say.OpenPublisher("rtmp://1932");
+				say.OpenPublisher("rtmp://192.168.0.101/live/main");
 			}
 		});
 		bt2.setOnClickListener(new OnClickListener() {

@@ -1,3 +1,10 @@
+/**
+ *
+ * Copyright (C) 2013 ALiang (illuspas@gmail.com)
+ *
+ * Licensed under the GPLv2 license. See 'COPYING' for more details.
+ *
+ */
 #include <jni.h>
 #include <assert.h>
 #include <string.h>
@@ -16,6 +23,10 @@
 
 #include <librtmp/rtmp.h>
 #include <speex/speex.h>
+#include <speex/speex_header.h>
+
+#include <librtmp/rtmp.h>
+#include <librtmp/log.h>
 
 #define LOG_TAG "Say.NDK"
 #define LOGI(...) ((void)__android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__))
@@ -45,18 +56,38 @@ char* pubRtmpUrl;
 pthread_t openPublisherPid;
 pthread_mutex_t recodMutex;
 pthread_cond_t recodCond;
+int isOpenPub;
 int isStartPub;
 
-SpeexBits ebits;     //speex
+SpeexBits ebits; //speex
 int enc_frame_size;
 void *enc_state;
-
-
+RTMP *rtmp; //rtmp
+const char speex_head=0xb6;
+int isPubConnected;
+uint32_t ts;
 
 //player variable
 int dec_frame_size; //speex
 SpeexBits dbits;
 void *dec_state;
+
+void send_pkt(char* buf,int buflen,int type,unsigned int timestamp)
+{
+    int ret;
+    RTMPPacket rtmp_pakt;
+    RTMPPacket_Reset(&rtmp_pakt);
+    RTMPPacket_Alloc(&rtmp_pakt,buflen);
+    rtmp_pakt.m_packetType = type;
+    rtmp_pakt.m_nBodySize = buflen;
+    rtmp_pakt.m_nTimeStamp = timestamp;
+    rtmp_pakt.m_nChannel = 4;
+    rtmp_pakt.m_headerType = RTMP_PACKET_SIZE_LARGE;
+    rtmp_pakt.m_nInfoField2 = rtmp->m_stream_id;
+    memcpy(rtmp_pakt.m_body,buf,buflen);
+    ret= RTMP_SendPacket(rtmp,&rtmp_pakt,0);
+    RTMPPacket_Free(&rtmp_pakt);
+}
 
 void bqRecorderCallback(SLAndroidSimpleBufferQueueItf bq, void *context)
 {
@@ -65,6 +96,7 @@ void bqRecorderCallback(SLAndroidSimpleBufferQueueItf bq, void *context)
     pthread_cond_signal(&recodCond);
     pthread_mutex_unlock(&recodMutex);
 }
+
 
 int initNativeRecoder()
 {
@@ -115,71 +147,101 @@ int initNativeRecoder()
     return JNI_TRUE;
 }
 
-
 void* openPubliserThread(void* args)
 {
     JNIEnv *env;
     SLresult result;
-    int i,enc_size;
+    int i, enc_size;
     short* pcm_buffer;
-    char*  output_buffer;
+    char* output_buffer;
     int compression = 4;
+    int sample_rate;
+    isOpenPub =1;
     (*gJvm)->AttachCurrentThread(gJvm, &env, NULL);
     pthread_mutex_init(&recodMutex, NULL);
     pthread_cond_init(&recodCond, NULL);
-    (*env)->CallVoidMethod(env, gObj, eventMid, 1); //Start init native audio recoder
-    if(!initNativeRecoder()) {
-        (*env)->CallVoidMethod(env, gObj, eventMid, 2);
-        return NULL;
-    }
-    //init speex encoder
-    speex_bits_init(&ebits);
-    enc_state = speex_encoder_init(&speex_nb_mode);
-    speex_encoder_ctl(enc_state, SPEEX_SET_QUALITY, &compression);
-    speex_encoder_ctl(enc_state, SPEEX_GET_FRAME_SIZE, &enc_frame_size);
-    pcm_buffer = malloc(enc_frame_size*sizeof(short));
-    output_buffer = malloc(enc_frame_size*sizeof(char));
-    LOGI("Speex Encoder init,enc_frame_size:%d\n",enc_frame_size);
+    do {
+        (*env)->CallVoidMethod(env, gObj, eventMid, 1); //Start init native audio recoder
 
-    (*env)->CallVoidMethod(env, gObj, eventMid, 3);
-    isStartPub = 1;
-    struct timeval start, end;
-    while (isStartPub) {
-        pthread_mutex_lock(&recodMutex);
-        // enqueue an empty buffer to be filled by the recorder
-        // (for streaming recording, we would enqueue at least 2 empty buffers to start things off)
-        result = (*recorderBufferQueue)->Enqueue(recorderBufferQueue, recorderBuffer, RECORDER_FRAMES * sizeof(short));
-        // the most likely other result is SL_RESULT_BUFFER_INSUFFICIENT,
-        // which for this code example would indicate a programming error
-        assert(SL_RESULT_SUCCESS == result);
-        pthread_cond_wait(&recodCond, &recodMutex);
-        pthread_mutex_unlock(&recodMutex);
-        LOGI("Got the audio buffer");
-        gettimeofday(&start, NULL);
-        for(i=0;i<RECORDER_FRAMES;i+=enc_frame_size)
-        {
-//            LOGI("encode position:%d\n",i);
-            speex_bits_reset(&ebits);
-            memcpy(pcm_buffer,recorderBuffer+i,enc_frame_size);
-            speex_encode_int(enc_state, pcm_buffer, &ebits);
-            enc_size = speex_bits_write(&ebits,output_buffer,enc_frame_size);
-
+        rtmp = RTMP_Alloc();
+        RTMP_Init(rtmp);
+        LOGI("RTMP_Init %s\n",pubRtmpUrl);
+        if (!RTMP_SetupURL(rtmp, pubRtmpUrl)) {
+            LOGI("RTMP_SetupURL error\n");
+            break;
         }
-        gettimeofday(&end, NULL);
-        int timeuse = 1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec;
-        LOGI("Encoding finish timeuse:%d\n",timeuse);
+        RTMP_EnableWrite(rtmp);
+        LOGI("RTMP_EnableWrite\n");
+        if (!RTMP_Connect(rtmp, NULL) || !RTMP_ConnectStream(rtmp, 0)) {
+            LOGI("RTMP_Connect or RTMP_ConnectStream error\n");
+            break;
+        }
+        LOGI("RTMP_Connected\n");
+        if (!initNativeRecoder()) {
+            (*env)->CallVoidMethod(env, gObj, eventMid, 2);
+            break;
+        }
+
+        //init speex encoder
+        speex_bits_init(&ebits);
+        enc_state = speex_encoder_init(&speex_wb_mode);
+        speex_encoder_ctl(enc_state, SPEEX_SET_QUALITY, &compression);
+        speex_encoder_ctl(enc_state, SPEEX_GET_FRAME_SIZE, &enc_frame_size);
+        speex_encoder_ctl(enc_state,SPEEX_GET_SAMPLING_RATE,&sample_rate);
+        pcm_buffer = malloc(enc_frame_size * sizeof(short));
+        output_buffer = malloc(enc_frame_size * sizeof(char));
+        LOGI("Speex Encoder init,enc_frame_size:%d sample_rate:%d\n", enc_frame_size,sample_rate);
+
+        (*env)->CallVoidMethod(env, gObj, eventMid, 3);
+        isStartPub = 1;
+        struct timeval start, end;
+        while (isStartPub) {
+            pthread_mutex_lock(&recodMutex);
+            // enqueue an empty buffer to be filled by the recorder
+            // (for streaming recording, we would enqueue at least 2 empty buffers to start things off)
+            result = (*recorderBufferQueue)->Enqueue(recorderBufferQueue, recorderBuffer, RECORDER_FRAMES * sizeof(short));
+            // the most likely other result is SL_RESULT_BUFFER_INSUFFICIENT,
+            // which for this code example would indicate a programming error
+            assert(SL_RESULT_SUCCESS == result);
+            pthread_cond_wait(&recodCond, &recodMutex);
+            pthread_mutex_unlock(&recodMutex);
+            LOGI("Got the audio buffer");
+         //   gettimeofday(&start, NULL);
+            for (i = 0; i < RECORDER_FRAMES; i += enc_frame_size) {
+                //            LOGI("encode position:%d\n",i);
+                speex_bits_reset(&ebits);
+                memcpy(pcm_buffer, recorderBuffer + i, enc_frame_size*sizeof(short));
+                speex_encode_int(enc_state, pcm_buffer, &ebits);
+                enc_size = speex_bits_write(&ebits, output_buffer, enc_frame_size);
+          //      LOGI("enc_size:%d\n",enc_size);
+                char* send_buf = malloc(enc_size+1);
+                memcpy(send_buf,&speex_head,1);
+                memcpy(send_buf+1,output_buffer,enc_size);
+                send_pkt(send_buf,enc_size+1,RTMP_PACKET_TYPE_AUDIO,ts+=20);
+                free(send_buf);
+            }
+         //   gettimeofday(&end, NULL);
+          //  int timeuse = 1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec;
+          //  LOGI("Encoding finish timeuse:%d\n", timeuse);
+        }
+        result = (*recorderRecord)->SetRecordState(recorderRecord, SL_RECORDSTATE_STOPPED);
+        if (SL_RESULT_SUCCESS == result) {
+            LOGI("SetRecordState SL_RECORDSTATE_STOPPED!\n");
+        }
+        (*env)->CallVoidMethod(env, gObj, eventMid, 4);
+
+        free(pcm_buffer);
+        free(output_buffer);
+        speex_bits_destroy(&ebits);
+        speex_encoder_destroy(enc_state);
+    } while (0);
+    if (RTMP_IsConnected(rtmp)) {
+        RTMP_Close(rtmp);
     }
-    result = (*recorderRecord)->SetRecordState(recorderRecord, SL_RECORDSTATE_STOPPED);
-    if (SL_RESULT_SUCCESS == result) {
-        LOGI("SetRecordState SL_RECORDSTATE_STOPPED!\n");
-    }
-    (*env)->CallVoidMethod(env, gObj, eventMid, 4);
-    (*gJvm)->DetachCurrentThread(gJvm);
-    free(pcm_buffer);
-    free(output_buffer);
+    RTMP_Free(rtmp);
     free(pubRtmpUrl);
-    speex_bits_destroy(&ebits);
-    speex_encoder_destroy(enc_state);
+    (*gJvm)->DetachCurrentThread(gJvm);
+    isOpenPub=0;
 }
 
 /*
@@ -216,6 +278,10 @@ void* openPubliserThread(void* args)
 
 JNIEXPORT void JNICALL Java_cn_cloudstep_sayhi_SayHi_OpenPublisher(JNIEnv *env, jobject jobj, jstring jRtmpUrl)
 {
+    if(isOpenPub)
+    {
+        return;
+    }
     LOGI("Java_cn_cloudstep_sayhi_SayHi_OpenPublisher");
     const char* rtmpUrl = (*env)->GetStringUTFChars(env, jRtmpUrl, 0);
     pubRtmpUrl = malloc(strlen(rtmpUrl) + 1);
