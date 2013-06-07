@@ -62,30 +62,41 @@ int isStartPub;
 SpeexBits ebits; //speex
 int enc_frame_size;
 void *enc_state;
-RTMP *rtmp; //rtmp
-const char speex_head=0xb6;
+RTMP *pubRtmp; //rtmp
+const char speex_head = 0xb6;
 int isPubConnected;
 uint32_t ts;
 
 //player variable
+char* playRtmpUrl;
+int isOpenPlay;
+
+pthread_t openPlayerPid;
+pthread_mutex_t playMutex;
+pthread_cond_t playCond;
+
+int isOpenPlay;
+int isStartPlay;
+
+RTMP *playRtmp; //rtmp
 int dec_frame_size; //speex
 SpeexBits dbits;
 void *dec_state;
 
-void send_pkt(char* buf,int buflen,int type,unsigned int timestamp)
+void send_pkt(char* buf, int buflen, int type, unsigned int timestamp)
 {
     int ret;
     RTMPPacket rtmp_pakt;
     RTMPPacket_Reset(&rtmp_pakt);
-    RTMPPacket_Alloc(&rtmp_pakt,buflen);
+    RTMPPacket_Alloc(&rtmp_pakt, buflen);
     rtmp_pakt.m_packetType = type;
     rtmp_pakt.m_nBodySize = buflen;
     rtmp_pakt.m_nTimeStamp = timestamp;
     rtmp_pakt.m_nChannel = 4;
     rtmp_pakt.m_headerType = RTMP_PACKET_SIZE_LARGE;
-    rtmp_pakt.m_nInfoField2 = rtmp->m_stream_id;
-    memcpy(rtmp_pakt.m_body,buf,buflen);
-    ret= RTMP_SendPacket(rtmp,&rtmp_pakt,0);
+    rtmp_pakt.m_nInfoField2 = pubRtmp->m_stream_id;
+    memcpy(rtmp_pakt.m_body, buf, buflen);
+    ret = RTMP_SendPacket(pubRtmp, &rtmp_pakt, 0);
     RTMPPacket_Free(&rtmp_pakt);
 }
 
@@ -96,7 +107,6 @@ void bqRecorderCallback(SLAndroidSimpleBufferQueueItf bq, void *context)
     pthread_cond_signal(&recodCond);
     pthread_mutex_unlock(&recodMutex);
 }
-
 
 int initNativeRecoder()
 {
@@ -154,25 +164,25 @@ void* openPubliserThread(void* args)
     int i, enc_size;
     short* pcm_buffer;
     char* output_buffer;
-    int compression = 4;
+    int compression = 2;
     int sample_rate;
-    isOpenPub =1;
+    isOpenPub = 1;
     (*gJvm)->AttachCurrentThread(gJvm, &env, NULL);
     pthread_mutex_init(&recodMutex, NULL);
     pthread_cond_init(&recodCond, NULL);
     do {
         (*env)->CallVoidMethod(env, gObj, eventMid, 1); //Start init native audio recoder
 
-        rtmp = RTMP_Alloc();
-        RTMP_Init(rtmp);
-        LOGI("RTMP_Init %s\n",pubRtmpUrl);
-        if (!RTMP_SetupURL(rtmp, pubRtmpUrl)) {
+        pubRtmp = RTMP_Alloc();
+        RTMP_Init(pubRtmp);
+        LOGI("RTMP_Init %s\n", pubRtmpUrl);
+        if (!RTMP_SetupURL(pubRtmp,pubRtmpUrl)) {
             LOGI("RTMP_SetupURL error\n");
             break;
         }
-        RTMP_EnableWrite(rtmp);
+        RTMP_EnableWrite(pubRtmp);
         LOGI("RTMP_EnableWrite\n");
-        if (!RTMP_Connect(rtmp, NULL) || !RTMP_ConnectStream(rtmp, 0)) {
+        if (!RTMP_Connect(pubRtmp, NULL) || !RTMP_ConnectStream(pubRtmp, 0)) {
             LOGI("RTMP_Connect or RTMP_ConnectStream error\n");
             break;
         }
@@ -187,10 +197,10 @@ void* openPubliserThread(void* args)
         enc_state = speex_encoder_init(&speex_wb_mode);
         speex_encoder_ctl(enc_state, SPEEX_SET_QUALITY, &compression);
         speex_encoder_ctl(enc_state, SPEEX_GET_FRAME_SIZE, &enc_frame_size);
-        speex_encoder_ctl(enc_state,SPEEX_GET_SAMPLING_RATE,&sample_rate);
+        speex_encoder_ctl(enc_state, SPEEX_GET_SAMPLING_RATE, &sample_rate);
         pcm_buffer = malloc(enc_frame_size * sizeof(short));
         output_buffer = malloc(enc_frame_size * sizeof(char));
-        LOGI("Speex Encoder init,enc_frame_size:%d sample_rate:%d\n", enc_frame_size,sample_rate);
+        LOGI("Speex Encoder init,enc_frame_size:%d sample_rate:%d\n", enc_frame_size, sample_rate);
 
         (*env)->CallVoidMethod(env, gObj, eventMid, 3);
         isStartPub = 1;
@@ -206,23 +216,23 @@ void* openPubliserThread(void* args)
             pthread_cond_wait(&recodCond, &recodMutex);
             pthread_mutex_unlock(&recodMutex);
             LOGI("Got the audio buffer");
-         //   gettimeofday(&start, NULL);
+            //   gettimeofday(&start, NULL);
             for (i = 0; i < RECORDER_FRAMES; i += enc_frame_size) {
                 //            LOGI("encode position:%d\n",i);
                 speex_bits_reset(&ebits);
-                memcpy(pcm_buffer, recorderBuffer + i, enc_frame_size*sizeof(short));
+                memcpy(pcm_buffer, recorderBuffer + i, enc_frame_size * sizeof(short));
                 speex_encode_int(enc_state, pcm_buffer, &ebits);
                 enc_size = speex_bits_write(&ebits, output_buffer, enc_frame_size);
-          //      LOGI("enc_size:%d\n",enc_size);
-                char* send_buf = malloc(enc_size+1);
-                memcpy(send_buf,&speex_head,1);
-                memcpy(send_buf+1,output_buffer,enc_size);
-                send_pkt(send_buf,enc_size+1,RTMP_PACKET_TYPE_AUDIO,ts+=20);
+                //      LOGI("enc_size:%d\n",enc_size);
+                char* send_buf = malloc(enc_size + 1);
+                memcpy(send_buf, &speex_head, 1);
+                memcpy(send_buf + 1, output_buffer, enc_size);
+                send_pkt(send_buf, enc_size + 1, RTMP_PACKET_TYPE_AUDIO, ts += 20);
                 free(send_buf);
             }
-         //   gettimeofday(&end, NULL);
-          //  int timeuse = 1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec;
-          //  LOGI("Encoding finish timeuse:%d\n", timeuse);
+            //   gettimeofday(&end, NULL);
+            //  int timeuse = 1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec;
+            //  LOGI("Encoding finish timeuse:%d\n", timeuse);
         }
         result = (*recorderRecord)->SetRecordState(recorderRecord, SL_RECORDSTATE_STOPPED);
         if (SL_RESULT_SUCCESS == result) {
@@ -235,13 +245,57 @@ void* openPubliserThread(void* args)
         speex_bits_destroy(&ebits);
         speex_encoder_destroy(enc_state);
     } while (0);
-    if (RTMP_IsConnected(rtmp)) {
-        RTMP_Close(rtmp);
+    if (RTMP_IsConnected(pubRtmp)) {
+        RTMP_Close(pubRtmp);
     }
-    RTMP_Free(rtmp);
+    RTMP_Free(pubRtmp);
     free(pubRtmpUrl);
     (*gJvm)->DetachCurrentThread(gJvm);
-    isOpenPub=0;
+    isOpenPub = 0;
+}
+
+void* openPlayerThread(void* args)
+{
+    isOpenPlay = 1;
+    do {
+        playRtmp = RTMP_Alloc();
+        RTMP_Init(playRtmp);
+        LOGI("Play RTMP_Init %s\n", playRtmpUrl);
+        if (!RTMP_SetupURL(playRtmp, playRtmpUrl)) {
+            LOGI("Play RTMP_SetupURL error\n");
+            break;
+        }
+        if (!RTMP_Connect(playRtmp, NULL) || !RTMP_ConnectStream(playRtmp, 0)) {
+            LOGI("Play RTMP_Connect or RTMP_ConnectStream error\n");
+            break;
+        }
+        LOGI("RTMP_Connected\n");
+        RTMPPacket rtmp_pakt = { 0 };
+        isStartPlay = 1;
+        while (isStartPlay && RTMP_ReadPacket(playRtmp, &rtmp_pakt)) {
+            if (RTMPPacket_IsReady(&rtmp_pakt)) {
+                if (!rtmp_pakt.m_nBodySize)
+                    continue;
+                if (rtmp_pakt.m_packetType == RTMP_PACKET_TYPE_AUDIO) {
+                    // 处理音频数据包
+                } else if(rtmp_pakt.m_packetType == RTMP_PACKET_TYPE_VIDEO) {
+                    // 处理视频数据包
+                } else if (rtmp_pakt.m_packetType == RTMP_PACKET_TYPE_INFO) {
+                    // 处理信息包
+                } else if (rtmp_pakt.m_packetType == RTMP_PACKET_TYPE_FLASH_VIDEO){
+                    // 其他数据
+                    LOGI("RTMP_PACKET_TYPE_FLASH_VIDEO");
+                }
+                LOGI("rtmp_pakt size:%d  type:%d\n",rtmp_pakt.m_nBodySize, rtmp_pakt.m_packetType);
+                RTMPPacket_Free(&rtmp_pakt);
+            }
+        }
+    } while (0);
+    if (RTMP_IsConnected(playRtmp)) {
+        RTMP_Close(playRtmp);
+    }
+    RTMP_Free(playRtmp);
+    isOpenPlay = 0;
 }
 
 /*
@@ -278,13 +332,13 @@ void* openPubliserThread(void* args)
 
 JNIEXPORT void JNICALL Java_cn_cloudstep_sayhi_SayHi_OpenPublisher(JNIEnv *env, jobject jobj, jstring jRtmpUrl)
 {
-    if(isOpenPub)
-    {
+    if (isOpenPub) {
         return;
     }
     LOGI("Java_cn_cloudstep_sayhi_SayHi_OpenPublisher");
     const char* rtmpUrl = (*env)->GetStringUTFChars(env, jRtmpUrl, 0);
     pubRtmpUrl = malloc(strlen(rtmpUrl) + 1);
+    memset(pubRtmpUrl, 0, strlen(rtmpUrl) + 1);
     strcpy(pubRtmpUrl, rtmpUrl);
     pthread_create(&openPublisherPid, &attr, openPubliserThread, NULL);
     (*env)->ReleaseStringUTFChars(env, jRtmpUrl, rtmpUrl);
@@ -311,6 +365,15 @@ JNIEXPORT void JNICALL Java_cn_cloudstep_sayhi_SayHi_OpenPublisher(JNIEnv *env, 
 
 JNIEXPORT void JNICALL Java_cn_cloudstep_sayhi_SayHi_OpenPlayer(JNIEnv *env, jobject jobj, jstring jRtmpUrl)
 {
+    if (isOpenPlay) {
+        return;
+    }
+    LOGI("Java_cn_cloudstep_sayhi_SayHi_OpenPlayer");
+    const char* rtmpUrl = (*env)->GetStringUTFChars(env, jRtmpUrl, 0);
+    playRtmpUrl = malloc(strlen(rtmpUrl) + 1);
+    strcpy(playRtmpUrl, rtmpUrl);
+    pthread_create(&openPlayerPid, &attr, openPlayerThread, NULL);
+    (*env)->ReleaseStringUTFChars(env, jRtmpUrl, rtmpUrl);
 }
 
 /*
@@ -321,6 +384,7 @@ JNIEXPORT void JNICALL Java_cn_cloudstep_sayhi_SayHi_OpenPlayer(JNIEnv *env, job
 
 JNIEXPORT void JNICALL Java_cn_cloudstep_sayhi_SayHi_ClosePlayer(JNIEnv *env, jobject jobj)
 {
+    isStartPlay = 0;
 }
 
 /*

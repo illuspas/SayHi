@@ -24,7 +24,13 @@ public class MainActivity extends Activity {
 
 			@Override
 			public void onClick(View v) {
-				say.OpenPublisher("rtmp://192.168.0.101/live/main");
+				say.OpenPublisher("rtmp://192.168.0.10/live/main1");
+				try {
+					Thread.sleep(3000);
+				} catch (InterruptedException e) {
+					e.printStackTrace();
+				}
+				say.OpenPlayer("rtmp://192.168.0.10/live/main1 live=1");
 			}
 		});
 		bt2.setOnClickListener(new OnClickListener() {
@@ -32,6 +38,7 @@ public class MainActivity extends Activity {
 			@Override
 			public void onClick(View v) {
 				say.ClosePublisher();
+				say.ClosePlayer();
 			}
 		});
 	}
