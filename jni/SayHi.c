@@ -290,6 +290,7 @@ void* openPubliserThread(void* args)
         free(output_buffer);
         speex_bits_destroy(&ebits);
         speex_encoder_destroy(enc_state);
+        (*recorderObject)->Destroy(recorderObject);
     } while (0);
     if (RTMP_IsConnected(pubRtmp)) {
         RTMP_Close(pubRtmp);
@@ -396,9 +397,9 @@ void* openPlayerThread(void* args)
         }
         LOGI("RTMP_Connected\n");
 
-        //TODO 初始化 opensl es
+        // 初始化 opensl es
         initNativePlayer();
-        //TODO 初始化speex解码器
+        // 初始化speex解码器
         speex_bits_init(&dbits);
         dec_state = speex_decoder_init(&speex_wb_mode);
         speex_decoder_ctl(dec_state, SPEEX_GET_FRAME_SIZE, &dec_frame_size);
@@ -472,6 +473,9 @@ void* openPlayerThread(void* args)
     }
     RTMP_Free(playRtmp);
     free(output_buffer);
+    speex_bits_destroy(&dbits);
+    speex_decoder_destroy(dec_state);
+    (*bqPlayerObject)->Destroy(bqPlayerObject);
     isOpenPlay = 0;
 }
 
