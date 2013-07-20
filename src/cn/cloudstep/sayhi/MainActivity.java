@@ -1,5 +1,6 @@
 package cn.cloudstep.sayhi;
 
+import cn.cloudstep.sayhi.SayHi.OnEventCallback;
 import android.app.Activity;
 import android.os.Bundle;
 import android.view.Menu;
@@ -17,7 +18,16 @@ public class MainActivity extends Activity {
 		setContentView(R.layout.activity_main);
 		say = new SayHi();
 		say.Init();
-
+		say.setOnEventCallback(new OnEventCallback() {
+			
+			@Override
+			public void onEvent(int event) {
+				if(event == 3)
+				{
+					say.OpenPlayer("rtmp://192.168.0.10/live/main1 live=1");
+				}
+			}
+		});
 		bt1 = (Button) findViewById(R.id.button1);
 		bt2 = (Button) findViewById(R.id.button2);
 		bt1.setOnClickListener(new OnClickListener() {
@@ -25,12 +35,6 @@ public class MainActivity extends Activity {
 			@Override
 			public void onClick(View v) {
 				say.OpenPublisher("rtmp://192.168.0.10/live/main1");
-				try {
-					Thread.sleep(3000);
-				} catch (InterruptedException e) {
-					e.printStackTrace();
-				}
-				say.OpenPlayer("rtmp://192.168.0.10/live/main1 live=1");
 			}
 		});
 		bt2.setOnClickListener(new OnClickListener() {

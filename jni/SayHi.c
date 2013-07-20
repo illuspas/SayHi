@@ -46,6 +46,21 @@ static short recorderBuffer[RECORDER_FRAMES];
 static unsigned recorderSize = 0;
 static SLmilliHertz recorderSR;
 
+// output mix interfaces
+static SLObjectItf outputMixObject = NULL;
+static SLEnvironmentalReverbItf outputMixEnvironmentalReverb = NULL;
+
+// buffer queue player interfaces
+static SLObjectItf bqPlayerObject = NULL;
+static SLPlayItf bqPlayerPlay;
+static SLAndroidSimpleBufferQueueItf bqPlayerBufferQueue;
+static SLEffectSendItf bqPlayerEffectSend;
+static SLMuteSoloItf bqPlayerMuteSolo;
+static SLVolumeItf bqPlayerVolume;
+
+static short playerBuffer[RECORDER_FRAMES];
+static unsigned playerSize = 0;
+
 JavaVM *gJvm = NULL;
 jobject gObj = NULL;
 jmethodID eventMid;
@@ -68,6 +83,10 @@ int isPubConnected;
 uint32_t ts;
 
 //player variable
+SpeexBits dbits;
+int dec_frame_size;
+void *dec_state;
+
 char* playRtmpUrl;
 int isOpenPlay;
 
@@ -82,6 +101,33 @@ RTMP *playRtmp; //rtmp
 int dec_frame_size; //speex
 SpeexBits dbits;
 void *dec_state;
+
+int bigFourByteToInt(char* bytes)
+{
+    int num = 0;
+    num += (int) bytes[0] << 24;
+    num += (int) bytes[1] << 16;
+    num += (int) bytes[2] << 8;
+    num += (int) bytes[3];
+    return num;
+}
+
+int bigThreeByteToInt(char* bytes)
+{
+    int num = 0;
+    num += (int) bytes[0] << 16;
+    num += (int) bytes[1] << 8;
+    num += (int) bytes[2];
+    return num;
+}
+
+int bigTwoByteToInt(char* bytes)
+{
+    int num = 0;
+    num += (int) bytes[0] << 8;
+    num += (int) bytes[1];
+    return num;
+}
 
 void send_pkt(char* buf, int buflen, int type, unsigned int timestamp)
 {
@@ -176,7 +222,7 @@ void* openPubliserThread(void* args)
         pubRtmp = RTMP_Alloc();
         RTMP_Init(pubRtmp);
         LOGI("RTMP_Init %s\n", pubRtmpUrl);
-        if (!RTMP_SetupURL(pubRtmp,pubRtmpUrl)) {
+        if (!RTMP_SetupURL(pubRtmp, pubRtmpUrl)) {
             LOGI("RTMP_SetupURL error\n");
             break;
         }
@@ -200,7 +246,7 @@ void* openPubliserThread(void* args)
         speex_encoder_ctl(enc_state, SPEEX_GET_SAMPLING_RATE, &sample_rate);
         pcm_buffer = malloc(enc_frame_size * sizeof(short));
         output_buffer = malloc(enc_frame_size * sizeof(char));
-        LOGI("Speex Encoder init,enc_frame_size:%d sample_rate:%d\n", enc_frame_size, sample_rate);
+        LOGI( "Speex Encoder init,enc_frame_size:%d sample_rate:%d\n", enc_frame_size, sample_rate);
 
         (*env)->CallVoidMethod(env, gObj, eventMid, 3);
         isStartPub = 1;
@@ -254,9 +300,88 @@ void* openPubliserThread(void* args)
     isOpenPub = 0;
 }
 
+// this callback handler is called every time a buffer finishes playing
+void bqPlayerCallback(SLAndroidSimpleBufferQueueItf bq, void *context)
+{
+    LOGI("bqPlayerCallback\n");
+}
+
+// create buffer queue audio player
+void initNativePlayer()
+{
+    SLresult result;
+
+    // configure audio source
+    SLDataLocator_AndroidSimpleBufferQueue loc_bufq = { SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE, 2 };
+    SLDataFormat_PCM format_pcm = { SL_DATAFORMAT_PCM, 1, SL_SAMPLINGRATE_16, SL_PCMSAMPLEFORMAT_FIXED_16, SL_PCMSAMPLEFORMAT_FIXED_16, SL_SPEAKER_FRONT_CENTER, SL_BYTEORDER_LITTLEENDIAN };
+    SLDataSource audioSrc = { &loc_bufq, &format_pcm };
+
+    // configure audio sink
+    SLDataLocator_OutputMix loc_outmix = { SL_DATALOCATOR_OUTPUTMIX, outputMixObject };
+    SLDataSink audioSnk = { &loc_outmix, NULL };
+
+    // create audio player
+    const SLInterfaceID ids[3] = { SL_IID_BUFFERQUEUE, SL_IID_EFFECTSEND, /*SL_IID_MUTESOLO,*/SL_IID_VOLUME };
+    const SLboolean req[3] = { SL_BOOLEAN_TRUE, SL_BOOLEAN_TRUE, /*SL_BOOLEAN_TRUE,*/SL_BOOLEAN_TRUE };
+    result = (*engineEngine)->CreateAudioPlayer(engineEngine, &bqPlayerObject, &audioSrc, &audioSnk, 3, ids, req);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // realize the player
+    result = (*bqPlayerObject)->Realize(bqPlayerObject, SL_BOOLEAN_FALSE);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // get the play interface
+    result = (*bqPlayerObject)->GetInterface(bqPlayerObject, SL_IID_PLAY, &bqPlayerPlay);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // get the buffer queue interface
+    result = (*bqPlayerObject)->GetInterface(bqPlayerObject, SL_IID_BUFFERQUEUE, &bqPlayerBufferQueue);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // register callback on the buffer queue
+    result = (*bqPlayerBufferQueue)->RegisterCallback(bqPlayerBufferQueue, bqPlayerCallback, NULL);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // get the effect send interface
+    result = (*bqPlayerObject)->GetInterface(bqPlayerObject, SL_IID_EFFECTSEND, &bqPlayerEffectSend);
+    assert(SL_RESULT_SUCCESS == result);
+
+#if 0   // mute/solo is not supported for sources that are known to be mono, as this is
+    // get the mute/solo interface
+    result = (*bqPlayerObject)->GetInterface(bqPlayerObject, SL_IID_MUTESOLO, &bqPlayerMuteSolo);
+    assert(SL_RESULT_SUCCESS == result);
+#endif
+
+    // get the volume interface
+    result = (*bqPlayerObject)->GetInterface(bqPlayerObject, SL_IID_VOLUME, &bqPlayerVolume);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // set the player's state to playing
+    result = (*bqPlayerPlay)->SetPlayState(bqPlayerPlay, SL_PLAYSTATE_PLAYING);
+    assert(SL_RESULT_SUCCESS == result);
+
+}
+int playerBufferIndex = 0;
+void putAudioQueue(short* data, int dataSize)
+{
+   // LOGI("putAudioQueue");
+    memcpy(playerBuffer+playerBufferIndex,data,dataSize*sizeof(short));
+    playerBufferIndex+=dataSize;
+    LOGI("playerBufferIndex %d   all:%d",playerBufferIndex,RECORDER_FRAMES);
+    if(playerBufferIndex == RECORDER_FRAMES)
+    {
+        SLresult result;
+        result = (*bqPlayerBufferQueue)->Enqueue(bqPlayerBufferQueue, playerBuffer, RECORDER_FRAMES * sizeof(short));
+        playerBufferIndex = 0;
+        LOGI("Enqueue player buffer");
+    }
+}
+
+
 void* openPlayerThread(void* args)
 {
     isOpenPlay = 1;
+    short *output_buffer;
     do {
         playRtmp = RTMP_Alloc();
         RTMP_Init(playRtmp);
@@ -270,6 +395,15 @@ void* openPlayerThread(void* args)
             break;
         }
         LOGI("RTMP_Connected\n");
+
+        //TODO 初始化 opensl es
+        initNativePlayer();
+        //TODO 初始化speex解码器
+        speex_bits_init(&dbits);
+        dec_state = speex_decoder_init(&speex_wb_mode);
+        speex_decoder_ctl(dec_state, SPEEX_GET_FRAME_SIZE, &dec_frame_size);
+        output_buffer = malloc(dec_frame_size * sizeof(short));
+
         RTMPPacket rtmp_pakt = { 0 };
         isStartPlay = 1;
         while (isStartPlay && RTMP_ReadPacket(playRtmp, &rtmp_pakt)) {
@@ -278,15 +412,57 @@ void* openPlayerThread(void* args)
                     continue;
                 if (rtmp_pakt.m_packetType == RTMP_PACKET_TYPE_AUDIO) {
                     // 处理音频数据包
-                } else if(rtmp_pakt.m_packetType == RTMP_PACKET_TYPE_VIDEO) {
+                   // LOGI("AUDIO audio size:%d  head:%d  time:%d\n", rtmp_pakt.m_nBodySize, rtmp_pakt.m_body[0], rtmp_pakt.m_nTimeStamp);
+                    speex_bits_read_from(&dbits, rtmp_pakt.m_body + 1, rtmp_pakt.m_nBodySize - 1);
+                    speex_decode_int(dec_state, &dbits, output_buffer);
+                    putAudioQueue(output_buffer,dec_frame_size);
+                } else if (rtmp_pakt.m_packetType == RTMP_PACKET_TYPE_VIDEO) {
                     // 处理视频数据包
                 } else if (rtmp_pakt.m_packetType == RTMP_PACKET_TYPE_INFO) {
                     // 处理信息包
-                } else if (rtmp_pakt.m_packetType == RTMP_PACKET_TYPE_FLASH_VIDEO){
+                } else if (rtmp_pakt.m_packetType == RTMP_PACKET_TYPE_FLASH_VIDEO) {
                     // 其他数据
-                    LOGI("RTMP_PACKET_TYPE_FLASH_VIDEO");
+                    int index = 0;
+                    while (1) {
+                        int StreamType; //1-byte
+                        int MediaSize; //3-byte
+                        int TiMMER; //3-byte
+                        int Reserve; //4-byte
+                        char* MediaData; //MediaSize-byte
+                        int TagLen; //4-byte
+
+                        StreamType = rtmp_pakt.m_body[index];
+                        index += 1;
+                        MediaSize = bigThreeByteToInt(rtmp_pakt.m_body + index);
+                        index += 3;
+                        TiMMER = bigThreeByteToInt(rtmp_pakt.m_body + index);
+                        index += 3;
+                        Reserve = bigFourByteToInt(rtmp_pakt.m_body + index);
+                        index += 4;
+                        MediaData = rtmp_pakt.m_body + index;
+                        index += MediaSize;
+                        TagLen = bigFourByteToInt(rtmp_pakt.m_body + index);
+                        index += 4;
+                        //LOGI("bodySize:%d   index:%d",rtmp_pakt.m_nBodySize,index);
+                        //LOGI("StreamType:%d MediaSize:%d  TiMMER:%d TagLen:%d\n", StreamType, MediaSize, TiMMER, TagLen);
+                        if (StreamType == 0x08) {
+                            //音频包
+                            //int MediaSize = bigThreeByteToInt(rtmp_pakt.m_body+1);
+                          //  LOGI("FLASH audio size:%d  head:%d time:%d\n", MediaSize, MediaData[0], TiMMER);
+                            speex_bits_read_from(&dbits, MediaData + 1, MediaSize - 1);
+                            speex_decode_int(dec_state, &dbits, output_buffer);
+                            putAudioQueue(output_buffer,dec_frame_size);
+                        } else if (StreamType == 0x09) {
+                            //视频包
+                            //  LOGI( "video size:%d  head:%d\n", MediaSize, MediaData[0]);
+                        }
+                        if (rtmp_pakt.m_nBodySize == index) {
+                       //     LOGI("one pakt over\n");
+                            break;
+                        }
+                    }
                 }
-                LOGI("rtmp_pakt size:%d  type:%d\n",rtmp_pakt.m_nBodySize, rtmp_pakt.m_packetType);
+                //  LOGI( "rtmp_pakt size:%d  type:%d\n", rtmp_pakt.m_nBodySize, rtmp_pakt.m_packetType);
                 RTMPPacket_Free(&rtmp_pakt);
             }
         }
@@ -295,6 +471,7 @@ void* openPlayerThread(void* args)
         RTMP_Close(playRtmp);
     }
     RTMP_Free(playRtmp);
+    free(output_buffer);
     isOpenPlay = 0;
 }
 
@@ -302,7 +479,8 @@ void* openPlayerThread(void* args)
  * Class:     cn_cloudstep_sayhi_SayHi
  * Method:    Init
  * Signature: ()V
- */JNIEXPORT void JNICALL Java_cn_cloudstep_sayhi_SayHi_Init(JNIEnv *env, jobject jobj)
+ */
+JNIEXPORT void JNICALL Java_cn_cloudstep_sayhi_SayHi_Init(JNIEnv *env, jobject jobj)
 {
     SLresult result;
 
@@ -315,6 +493,25 @@ void* openPlayerThread(void* args)
     // get the engine interface, which is needed in order to create other objects
     result = (*engineObject)->GetInterface(engineObject, SL_IID_ENGINE, &engineEngine);
     assert(SL_RESULT_SUCCESS == result);
+
+    // create output mix, with environmental reverb specified as a non-required interface
+    const SLInterfaceID ids[1] = { SL_IID_ENVIRONMENTALREVERB };
+    const SLboolean req[1] = { SL_BOOLEAN_FALSE };
+    result = (*engineEngine)->CreateOutputMix(engineEngine, &outputMixObject, 1, ids, req);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // realize the output mix
+    result = (*outputMixObject)->Realize(outputMixObject, SL_BOOLEAN_FALSE);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // get the environmental reverb interface
+    // this could fail if the environmental reverb effect is not available,
+    // either because the feature is not present, excessive CPU load, or
+    // the required MODIFY_AUDIO_SETTINGS permission was not requested and granted
+//    result = (*outputMixObject)->GetInterface(outputMixObject, SL_IID_ENVIRONMENTALREVERB, &outputMixEnvironmentalReverb);
+//    if (SL_RESULT_SUCCESS == result) {
+//        result = (*outputMixEnvironmentalReverb)->SetEnvironmentalReverbProperties(outputMixEnvironmentalReverb, &reverbSettings);
+//    }
 
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
