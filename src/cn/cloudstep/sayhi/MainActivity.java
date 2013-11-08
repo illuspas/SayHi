@@ -7,15 +7,19 @@ import android.view.Menu;
 import android.view.View;
 import android.view.View.OnClickListener;
 import android.widget.Button;
+import android.widget.EditText;
 
 public class MainActivity extends Activity {
 	SayHi say;
 	Button bt1, bt2;
-
+	EditText server,stream1,stream2;
 	@Override
 	protected void onCreate(Bundle savedInstanceState) {
 		super.onCreate(savedInstanceState);
 		setContentView(R.layout.activity_main);
+		server = (EditText)findViewById(R.id.editText1);
+		stream1 = (EditText)findViewById(R.id.editText2);
+		stream2 = (EditText)findViewById(R.id.editText3);
 		say = new SayHi();
 		say.Init();
 		say.setOnEventCallback(new OnEventCallback() {
@@ -24,7 +28,7 @@ public class MainActivity extends Activity {
 			public void onEvent(int event) {
 				if(event == 3)
 				{
-					say.OpenPlayer("rtmp://192.168.0.10/live/main1 live=1");
+					say.OpenPlayer(server.getText().toString()+"/"+stream1.getText().toString()+" live=1");
 				}
 			}
 		});
@@ -34,7 +38,7 @@ public class MainActivity extends Activity {
 
 			@Override
 			public void onClick(View v) {
-				say.OpenPublisher("rtmp://192.168.0.10/live/main1");
+				say.OpenPublisher(server.getText().toString()+"/"+stream2.getText().toString()+" live=1");
 			}
 		});
 		bt2.setOnClickListener(new OnClickListener() {
