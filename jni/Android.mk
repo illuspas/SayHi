@@ -27,7 +27,7 @@ LOCAL_LDLIBS    += -llog
 # for native asset manager
 LOCAL_LDLIBS    += -landroid
 # for Speex
-LOCAL_LDLIBS    += -lspeex -lspeexdsp
+LOCAL_LDLIBS    += -lspeex
 # for rtmpdump
 LOCAL_LDLIBS    += -lrtmp
 include $(BUILD_SHARED_LIBRARY)
